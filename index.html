@@ -1,0 +1,535 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+
+    <title>WebRTC Video Chat</title>
+
+    <script src="https://cdn.socket.io/4.8.1/socket.io.min.js"></script>
+
+    <style>
+      * {
+        box-sizing: border-box;
+        margin: 0;
+        padding: 0;
+      }
+
+      body {
+        min-height: 100vh;
+        background: #111827;
+        color: white;
+        font-family: Arial, sans-serif;
+      }
+
+      .app {
+        max-width: 1200px;
+        margin: auto;
+        padding: 20px;
+      }
+
+      .header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        margin-bottom: 20px;
+      }
+
+      .header h1 {
+        font-size: 24px;
+      }
+
+      .status {
+        padding: 8px 14px;
+        background: #374151;
+        border-radius: 20px;
+        font-size: 14px;
+      }
+
+      .room {
+        display: flex;
+        gap: 10px;
+        max-width: 500px;
+        margin: 0 auto 20px;
+      }
+
+      .room input {
+        flex: 1;
+        padding: 12px;
+        border: none;
+        outline: none;
+        border-radius: 8px;
+        font-size: 15px;
+      }
+
+      button {
+        border: none;
+        border-radius: 8px;
+        padding: 12px 18px;
+        background: #2563eb;
+        color: white;
+        cursor: pointer;
+        font-size: 14px;
+      }
+
+      button:hover {
+        background: #1d4ed8;
+      }
+
+      button.secondary {
+        background: #374151;
+      }
+
+      button.danger {
+        background: #dc2626;
+      }
+
+      .videos {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 15px;
+      }
+
+      .video-box {
+        position: relative;
+        background: black;
+        border-radius: 14px;
+        overflow: hidden;
+        aspect-ratio: 16 / 9;
+      }
+
+      video {
+        width: 100%;
+        height: 100%;
+        object-fit: cover;
+        display: block;
+        background: #000;
+      }
+
+      .label {
+        position: absolute;
+        left: 12px;
+        bottom: 12px;
+        padding: 7px 12px;
+        background: rgba(0, 0, 0, 0.65);
+        border-radius: 7px;
+        font-size: 14px;
+      }
+
+      .controls {
+        display: flex;
+        justify-content: center;
+        gap: 10px;
+        margin-top: 20px;
+        flex-wrap: wrap;
+      }
+
+      .message {
+        text-align: center;
+        margin-top: 20px;
+        padding: 12px;
+        background: #1f2937;
+        border-radius: 8px;
+        color: #d1d5db;
+      }
+
+      @media (max-width: 700px) {
+        .videos {
+          grid-template-columns: 1fr;
+        }
+
+        .room {
+          flex-direction: column;
+        }
+
+        .header h1 {
+          font-size: 20px;
+        }
+      }
+    </style>
+  </head>
+
+  <body>
+    <div class="app">
+      <div class="header">
+        <h1>WebRTC Video Chat</h1>
+
+        <div class="status" id="status">Connecting...</div>
+      </div>
+
+      <div class="room">
+        <input id="roomInput" type="text" placeholder="Enter room ID" />
+
+        <button id="joinBtn">Join</button>
+      </div>
+
+      <div class="videos">
+        <div class="video-box">
+          <video id="localVideo" autoplay muted playsinline></video>
+
+          <div class="label">You</div>
+        </div>
+
+        <div class="video-box">
+          <video id="remoteVideo" autoplay playsinline></video>
+
+          <div class="label">Remote User</div>
+        </div>
+      </div>
+
+      <div class="controls">
+        <button id="muteBtn" class="secondary">Mute</button>
+
+        <button id="cameraBtn" class="secondary">Camera Off</button>
+
+        <button id="hangupBtn" class="danger">End Call</button>
+      </div>
+
+      <div class="message" id="message">
+        Allow camera and microphone access.
+      </div>
+    </div>
+
+    <script>
+      const socket = io();
+
+      const localVideo = document.getElementById("localVideo");
+
+      const remoteVideo = document.getElementById("remoteVideo");
+
+      const roomInput = document.getElementById("roomInput");
+
+      const joinBtn = document.getElementById("joinBtn");
+
+      const muteBtn = document.getElementById("muteBtn");
+
+      const cameraBtn = document.getElementById("cameraBtn");
+
+      const hangupBtn = document.getElementById("hangupBtn");
+
+      const status = document.getElementById("status");
+
+      const message = document.getElementById("message");
+
+      let localStream = null;
+
+      let peerConnection = null;
+
+      let roomId = null;
+
+      let isInitiator = false;
+
+      let pendingCandidates = [];
+
+      const rtcConfiguration = {
+        iceServers: [
+          {
+            urls: "stun:stun.l.google.com:19302",
+          },
+        ],
+      };
+
+      socket.on("connect", () => {
+        status.textContent = "Connected";
+
+        console.log("Socket connected:", socket.id);
+      });
+
+      socket.on("disconnect", () => {
+        status.textContent = "Disconnected";
+      });
+
+      async function startCamera() {
+        try {
+          localStream = await navigator.mediaDevices.getUserMedia({
+            video: true,
+            audio: true,
+          });
+
+          localVideo.srcObject = localStream;
+
+          await localVideo.play();
+
+          console.log("Local camera started");
+
+          return true;
+        } catch (error) {
+          console.error("Camera error:", error);
+
+          message.textContent =
+            "Camera error: " + error.name + " - " + error.message;
+
+          return false;
+        }
+      }
+
+      function createPeerConnection() {
+        console.log("Creating peer connection");
+
+        peerConnection = new RTCPeerConnection(rtcConfiguration);
+
+        localStream.getTracks().forEach((track) => {
+          peerConnection.addTrack(track, localStream);
+        });
+
+        peerConnection.ontrack = async (event) => {
+          console.log("Remote track received");
+
+          const remoteStream = event.streams[0];
+
+          if (remoteVideo.srcObject !== remoteStream) {
+            remoteVideo.srcObject = remoteStream;
+          }
+
+          try {
+            await remoteVideo.play();
+          } catch (error) {
+            console.error("Remote video play error:", error);
+          }
+        };
+
+        peerConnection.onicecandidate = (event) => {
+          if (event.candidate && roomId) {
+            socket.emit("ice-candidate", {
+              roomId,
+              candidate: event.candidate,
+            });
+          }
+        };
+
+        peerConnection.onconnectionstatechange = () => {
+          const state = peerConnection.connectionState;
+
+          console.log("Connection state:", state);
+
+          status.textContent = state;
+
+          if (state === "connected") {
+            message.textContent = "Video call connected.";
+          }
+
+          if (state === "failed") {
+            message.textContent = "WebRTC connection failed.";
+          }
+        };
+
+        peerConnection.oniceconnectionstatechange = () => {
+          console.log("ICE state:", peerConnection.iceConnectionState);
+        };
+      }
+
+      async function createOffer() {
+        console.log("Creating offer...");
+
+        const offer = await peerConnection.createOffer();
+
+        await peerConnection.setLocalDescription(offer);
+
+        socket.emit("offer", {
+          roomId,
+          offer,
+        });
+      }
+
+      joinBtn.addEventListener("click", async () => {
+        roomId = roomInput.value.trim();
+
+        if (!roomId) {
+          message.textContent = "Please enter a room ID.";
+
+          return;
+        }
+
+        joinBtn.disabled = true;
+
+        const cameraStarted = await startCamera();
+
+        if (!cameraStarted) {
+          joinBtn.disabled = false;
+
+          return;
+        }
+
+        socket.emit("join-room", roomId);
+
+        message.textContent = "Joining room...";
+      });
+
+      socket.on("waiting", () => {
+        status.textContent = "Waiting";
+
+        message.textContent = "Waiting for another user...";
+      });
+
+      socket.on("ready", async ({ initiator }) => {
+        console.log("Ready. Initiator:", initiator);
+
+        isInitiator = initiator;
+
+        createPeerConnection();
+
+        if (isInitiator) {
+          message.textContent = "Calling the other user...";
+
+          await createOffer();
+        } else {
+          message.textContent = "Waiting for the caller...";
+        }
+      });
+
+      socket.on("offer", async (offer) => {
+        console.log("Offer received");
+
+        if (!peerConnection) {
+          createPeerConnection();
+        }
+
+        await peerConnection.setRemoteDescription(
+          new RTCSessionDescription(offer),
+        );
+
+        for (const candidate of pendingCandidates) {
+          try {
+            await peerConnection.addIceCandidate(candidate);
+          } catch (error) {
+            console.error(error);
+          }
+        }
+
+        pendingCandidates = [];
+
+        const answer = await peerConnection.createAnswer();
+
+        await peerConnection.setLocalDescription(answer);
+
+        socket.emit("answer", {
+          roomId,
+          answer,
+        });
+
+        message.textContent = "Answer sent. Connecting...";
+      });
+
+      socket.on("answer", async (answer) => {
+        console.log("Answer received");
+
+        if (!peerConnection) {
+          return;
+        }
+
+        await peerConnection.setRemoteDescription(
+          new RTCSessionDescription(answer),
+        );
+
+        for (const candidate of pendingCandidates) {
+          try {
+            await peerConnection.addIceCandidate(candidate);
+          } catch (error) {
+            console.error(error);
+          }
+        }
+
+        pendingCandidates = [];
+      });
+
+      socket.on("ice-candidate", async (candidate) => {
+        console.log("ICE candidate received");
+
+        const iceCandidate = new RTCIceCandidate(candidate);
+
+        if (peerConnection && peerConnection.remoteDescription) {
+          try {
+            await peerConnection.addIceCandidate(iceCandidate);
+          } catch (error) {
+            console.error("ICE error:", error);
+          }
+        } else {
+          pendingCandidates.push(iceCandidate);
+        }
+      });
+
+      socket.on("room-full", () => {
+        message.textContent = "Room is already full.";
+
+        joinBtn.disabled = false;
+      });
+
+      socket.on("user-left", () => {
+        remoteVideo.srcObject = null;
+
+        if (peerConnection) {
+          peerConnection.close();
+
+          peerConnection = null;
+        }
+
+        status.textContent = "Waiting";
+
+        message.textContent = "The other user left.";
+      });
+
+      muteBtn.addEventListener("click", () => {
+        if (!localStream) {
+          return;
+        }
+
+        const audioTrack = localStream.getAudioTracks()[0];
+
+        if (!audioTrack) {
+          return;
+        }
+
+        audioTrack.enabled = !audioTrack.enabled;
+
+        muteBtn.textContent = audioTrack.enabled ? "Mute" : "Unmute";
+      });
+
+      cameraBtn.addEventListener("click", () => {
+        if (!localStream) {
+          return;
+        }
+
+        const videoTrack = localStream.getVideoTracks()[0];
+
+        if (!videoTrack) {
+          return;
+        }
+
+        videoTrack.enabled = !videoTrack.enabled;
+
+        cameraBtn.textContent = videoTrack.enabled ? "Camera Off" : "Camera On";
+      });
+
+      hangupBtn.addEventListener("click", () => {
+        if (peerConnection) {
+          peerConnection.close();
+
+          peerConnection = null;
+        }
+
+        if (localStream) {
+          localStream.getTracks().forEach((track) => {
+            track.stop();
+          });
+
+          localStream = null;
+        }
+
+        localVideo.srcObject = null;
+
+        remoteVideo.srcObject = null;
+
+        if (roomId) {
+          socket.emit("leave-room", roomId);
+        }
+
+        status.textContent = "Disconnected";
+
+        message.textContent = "Call ended.";
+
+        joinBtn.disabled = false;
+      });
+    </script>
+  </body>
+</html>
